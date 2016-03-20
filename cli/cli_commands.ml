@@ -90,8 +90,7 @@ let _ =
 
   (* multi user chat *)
   new_command
-    "join" "/join [chatroom]" "joins chatroom" [] ;
-
+    "join" "/join [?chatroom]" "joins chatroom (or active contact)" [] ;
   new_command
     "leave" "/leave [?reason]" "leaves active chatroom (using reason)" [] ;
 
@@ -428,7 +427,9 @@ let handle_connect p c_mvar =
     let exec state =
       let status = Utils.option None (fun x -> Some (Utils.validate_utf8 x)) status in
       match jid with
-      | `Bare _ -> Lwt.return (`Ok state) (* XXX sth more sensible *)
+      | `Bare bare ->
+        let state, _ = find_room state bare in
+        Lwt.return (`Ok state)
       | `Full (bare, nickname) ->
         let state, r = find_room state bare in
         let real_jid, nick, affiliation, role =
@@ -897,14 +898,17 @@ let tell_user (log:(User.direction * string) -> unit) jid ?(prefix:string option
   let f = Utils.option from (fun x -> x ^ "; " ^ from) prefix in
   log (`Local (jid, f), msg)
 
-let handle_join state s my_nick buddies room err =
+let handle_join my_nick room =
   match Xjid.string_to_jid room with
   | Some (`Bare room_jid) ->
-     let room = Muc.new_room ~jid:room_jid ~my_nick () in
-     Contact.replace_room buddies room ;
-     Xmpp_callbacks.Xep_muc.enter_room s (Xjid.jid_to_xmpp_jid (`Bare room_jid)) >>= fun () ->
-     Lwt.return (`Ok state)
-  | _ -> err "not a bare jid"
+    let room = Muc.new_room ~jid:room_jid ~my_nick () in
+    let clos state s =
+      Contact.replace_room state.contacts room ;
+      Xmpp_callbacks.Xep_muc.enter_room s (Xjid.jid_to_xmpp_jid (`Bare room_jid)) >|= fun () ->
+      `Ok state
+    in
+    (["joining room"], None (* Some room *), Some clos)
+  | _ -> (["not a bare jid"], None, None)
 
 let handle_leave buddy reason =
   match buddy with
@@ -932,7 +936,7 @@ let exec input state contact isself p =
 
   let ok s = Lwt.return (`Ok s) in
 
-  let global_things = ["add";"status";"priority";"join"] in
+  let global_things = ["add";"status";"priority"] in
   match cmd_arg input with
   (* completely independent *)
   | ("help" , x) -> handle_help (msg ?prefix:None) x ; ok state
@@ -947,6 +951,9 @@ let exec input state contact isself p =
     (* disconnect *)
     | ("disconnect", _), Some _ -> handle_disconnect (msg ?prefix:None) >>= fun () -> ok state
     | ("disconnect", _), None   -> err "not connected"
+
+    (* join *)
+    | ("join", _), None -> err "not connected"
 
     (* log height *)
     | ("logheight", Some x), _ ->
@@ -981,12 +988,6 @@ let exec input state contact isself p =
          send_status s p >>= fun () ->
          ok state)
 
-    (* multi user chat *)
-    | ("join", Some a), Some s ->
-      let my_nick = fst (fst state.config.Xconfig.jid) in
-      handle_join state s my_nick state.contacts a err
-
-
     (* commands using active_contact as context *)
     | other, s ->
       let err str =
@@ -1018,6 +1019,17 @@ let exec input state contact isself p =
               handle_info contact (resource state) state.config_directory
           in
           (datas, None, None)
+
+        (* join *)
+        | ("join", Some a), Some _ ->
+          let my_nick = fst (fst state.config.Xconfig.jid) in
+          handle_join my_nick a
+        | ("join", None), Some _ ->
+          (match contact with
+           | `Room r ->
+             let my_nick = fst (fst state.config.Xconfig.jid) in
+             handle_join my_nick (Xjid.bare_jid_to_string r.Muc.room_jid)
+           | _ -> (["not a room"], None, None))
 
         | ("leave", reason), Some _ -> handle_leave contact reason
 
