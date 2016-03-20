@@ -93,6 +93,8 @@ let _ =
     "join" "/join [?chatroom]" "joins chatroom (or active contact)" [] ;
   new_command
     "leave" "/leave [?reason]" "leaves active chatroom (using reason)" [] ;
+  new_command
+    "rooms" "/rooms [server]" "queries chatrooms on server" [] ;
 
   (* nothing below here, please *)
   new_command
@@ -203,13 +205,16 @@ let handle_connect p c_mvar =
       let u = User.new_user ~jid:bare () in
       Contact.replace_user state.contacts u ;
       (state, u)
-  and find_room state bare =
+  in
+  let c_room state jid last_status =
+    let room = Muc.new_room ~jid ~my_nick:(fst (fst state.config.Xconfig.jid)) ~last_status () in
+    Contact.replace_room state.contacts room ;
+    (state, room)
+  in
+  let find_room state bare =
     match Contact.find_room state.contacts bare with
     | Some room -> (state, room)
-    | None ->
-      let room = Muc.new_room ~jid:bare ~my_nick:(fst (fst state.config.Xconfig.jid)) () in
-      Contact.replace_room state.contacts room ;
-      (state, room)
+    | None -> c_room state bare true
   and find_session state user resource =
     match
       User.find_session user resource,
@@ -511,6 +516,12 @@ let handle_connect p c_mvar =
       Lwt.return (`Ok state)
     in
     p exec
+  and create_room bare last_status =
+    let exec state =
+      let state, _ = c_room state bare last_status in
+      Lwt.return (`Ok state)
+    in
+    p exec
   in
   let (user_data : Xmpp_callbacks.user_data) = {
       Xmpp_callbacks.log ;
@@ -525,6 +536,8 @@ let handle_connect p c_mvar =
       subscription ;
       presence ;
       group_presence ;
+
+      create_room ;
 
       reset_users ;
       update_users ;
@@ -924,6 +937,43 @@ let handle_leave buddy reason =
      (["leaving room"], Some r, Some clos)
   | _ -> (["not a chatroom"], None, None)
 
+let handle_rooms host =
+  let clos state s =
+    let open Xmpp_callbacks in
+    let callback ev jid_from _jid_to _lang () =
+      let jid_from = match jid_from with
+        | None -> `Bare ("", "none")
+        | Some x -> match Xjid.string_to_jid x with
+          | Some x -> x
+          | None -> `Bare ("", x)
+      in
+      match ev with
+      | XMPPClient.IQError _ -> s.XMPPClient.user_data.log (`From jid_from) "couldn't find any rooms"
+      | XMPPClient.IQResult el ->
+        match el with
+        | Some (Xml.Xmlelement ((ns, "query"), _, els)) when ns = Disco.ns_disco_items ->
+          let name_id = List.fold_left (fun acc ele ->
+              match ele with
+              | Xml.Xmlelement ((_, "item"), attrs, _) ->
+                (Xml.safe_get_attr_value "name" attrs, Xml.safe_get_attr_value "jid" attrs) :: acc
+              | _ -> acc) [] els
+          in
+          let str = String.concat "; " (List.map fst name_id) in
+          s.XMPPClient.user_data.log (`From jid_from) ("rooms: " ^ str) >>= fun () ->
+          let jids = List.map Xjid.string_to_bare_jid (List.map snd name_id) in
+          Lwt_list.iter_s
+            (function
+              | None -> Lwt.return_unit
+              | Some id -> s.XMPPClient.user_data.create_room id false)
+            jids
+        | _ -> s.XMPPClient.user_data.log (`From jid_from) "no rooms"
+    in
+    XMPPClient.make_iq_request s ~jid_to:(JID.of_string host)
+      (XMPPClient.IQGet (Xml.make_element (Disco.ns_disco_items, "query") [] [])) callback >|= fun () ->
+    `Ok state
+  in
+  (["querying rooms"], None, Some clos)
+
 let exec input state contact isself p =
   let log (direction, msg) = add_status state direction msg in
   let msg = tell_user log state.active_contact in
@@ -1032,6 +1082,7 @@ let exec input state contact isself p =
            | _ -> (["not a room"], None, None))
 
         | ("leave", reason), Some _ -> handle_leave contact reason
+        | ("rooms", Some host), Some _ -> handle_rooms host
 
         | ("remove", _), None -> err "not connected"
         | ("remove", _), Some _ -> need_user (fun u -> ([], None, Some (handle_remove u)))
