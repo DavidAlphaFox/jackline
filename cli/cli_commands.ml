@@ -920,8 +920,8 @@ let handle_join my_nick room =
       Xmpp_callbacks.Xep_muc.enter_room s (Xjid.jid_to_xmpp_jid (`Bare room_jid)) >|= fun () ->
       `Ok state
     in
-    (["joining room"], None (* Some room *), Some clos)
-  | _ -> (["not a bare jid"], None, None)
+    (["joining room " ^ Xjid.bare_jid_to_string room_jid], None (* Some room *), Some clos)
+  | _ -> (["not a bare jid " ^ room], None, None)
 
 let handle_leave buddy reason =
   match buddy with
@@ -931,10 +931,11 @@ let handle_leave buddy reason =
      in
      let clos state s =
        Xmpp_callbacks.Xep_muc.leave_room s ?reason ~nick (Xjid.jid_to_xmpp_jid jid) >|= fun () ->
+       let room = { r with Muc.last_status = false } in
+       Contact.replace_room state.contacts room ;
        `Ok state
      in
-     let r = `Room { r with Muc.last_status = false } in
-     (["leaving room"], Some r, Some clos)
+     (["leaving room " ^ Xjid.bare_jid_to_string r.Muc.room_jid], None (* Some room *), Some clos)
   | _ -> (["not a chatroom"], None, None)
 
 let handle_rooms host =
